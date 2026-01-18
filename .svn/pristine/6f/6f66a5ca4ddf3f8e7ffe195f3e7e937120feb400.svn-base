@@ -1,0 +1,483 @@
+﻿using System;
+using System.IO;
+using System.Net.Http.Json;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+
+public class ImageProcessingService
+{
+    public enum LanguageEnum
+    {
+        German,
+        English
+    }
+
+    private static readonly string OllamaEndpoint = "http://localhost:11434/api/generate";
+    private static readonly string ModelName = "gemma3:12b";
+    private readonly HttpClient client = new();
+    private readonly SemaphoreSlim _parallelProcessingSemaphore = new(3, 3);
+
+    private DateTime _lastProgressUpdateTime = DateTime.MinValue;
+    private const int UpdateThrottleMs = 100; // 10 updates per second
+
+    public event EventHandler<ProcessingProgressEventArgs>? ProgressChanged;
+    public event EventHandler<ProcessingCompleteEventArgs>? ProcessingComplete;
+
+    public int TotalFileCount { get; private set; }
+    public int ProcessedFiles { get; private set; }
+
+    private ProcessingModeEnum ProcessingMode;
+    private bool MarkClassificationErrors;
+    private LanguageEnum CurrentLanguage;
+
+    public enum ProcessingModeEnum
+    {
+        ProcessAll, 
+        SkipTagged,
+        ProcessClassificationErrorsOnly
+    }
+
+    private string GetSystemPrompt(LanguageEnum language)
+    {
+        return language switch
+        {
+            LanguageEnum.German => "Du bist ein automatischer Bild-Metadaten-Generator. " +
+                  "DEINE REGELN:\n" +
+                  "1. Antworte AUSSCHLIESSLICH im Format: Schlagwort1;Schlagwort2;Schlagwort3;Schlagwort4;Schlagwort5;Schlagwort6;Schlagwort7;Schlagwort8|Ein Satz.\n" +
+                  "2. Sprache: Deutsch.\n" +
+                  "3. KEIN Einleitungstext, KEINE Höflichkeitsfloskeln, KEIN 'Das Bild zeigt'.\n" +
+                  "4. KEINE Stimmungen als Schlagwort verwenden (z.B. 'glücklich', 'traurig').\n" +
+                  "5. Das Trennzeichen '|' ist ZWINGEND erforderlich.\n" +
+                  "BEISPIEL:\n" +
+                  "Hund;Garten;Ball;Haus;Gras;Golden Retriever;Straße;Blumenkasten|Ein Hund rennt mit einem Ball über eine grüne Wiese.",
+
+            LanguageEnum.English => "You are an automatic image metadata generator. " +
+                  "YOUR RULES:\n" +
+                  "1. Answer EXCLUSIVELY in this format: keyword1;keyword2;keyword3;keyword4;keyword5;keyword6;keyword7;keyword8|One sentence.\n" +
+                  "2. Language: English.\n" +
+                  "3. NO introductory text, NO polite phrases, NO 'The image shows'.\n" +
+                  "4. DO NOT use emotions as keywords (e.g., 'happy', 'sad').\n" +
+                  "5. The separator '|' is MANDATORY.\n" +
+                  "EXAMPLE:\n" +
+                  "dog;garden;ball;house;grass;Golden Retriever;street;flower box|A dog runs with a ball across a green meadow.",
+
+            _ => throw new ArgumentException($"Unsupported language: {language}")
+        };
+    }
+
+    private string GetUserPrompt(LanguageEnum language)
+    {
+        return language switch
+        {
+            LanguageEnum.German => "Analysiere dieses Bild gemäß System-Schema. 8 Schlagworte, dann '|', dann 1 knapper Satz.",
+            LanguageEnum.English => "Analyze this image according to the system schema. 8 keywords, then '|', then 1 short sentence.",
+            _ => throw new ArgumentException($"Unsupported language: {language}")
+        };
+    }
+
+    public async Task StartProcessing(string targetDirectory, ProcessingModeEnum processingMode, bool markClassificationErrors, CancellationTokenSource cancellationTokenSource, LanguageEnum language = LanguageEnum.German)
+    {
+        ProcessingMode = processingMode;
+        MarkClassificationErrors = markClassificationErrors;
+        CurrentLanguage = language;
+
+        TotalFileCount = 0;
+        ProcessedFiles = 0;
+
+        // Start file counting and directory processing concurrently
+        var countTask = CountFilesRecursiveAsync(targetDirectory, cancellationTokenSource.Token);
+        var processTask = ProcessDirectoryAsync(targetDirectory, cancellationTokenSource.Token);
+
+        // Wait for both operations to complete
+        await Task.WhenAll(countTask, processTask);
+
+        ProcessingComplete?.Invoke(this, new ProcessingCompleteEventArgs
+        {
+            TotalFiles = TotalFileCount,
+            ProcessedFiles = ProcessedFiles
+        });
+    }
+
+    private async Task CountFilesRecursiveAsync(string directory, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Run(() =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                CountFilesRecursive(directory, cancellationToken);
+            }, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            // Gracefully handle cancellation
+            System.Diagnostics.Debug.WriteLine("File counting was cancelled");
+        }
+    }
+
+    private void CountFilesRecursive(string directory, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        string[] extensions = ["*.jpg", "*.jpeg"];
+
+        foreach (var ext in extensions)
+        {
+            TotalFileCount += Directory.GetFiles(directory, ext).Length;
+        }
+        foreach (string subdir in Directory.GetDirectories(directory))
+        {
+            CountFilesRecursive(subdir, cancellationToken);
+        }
+    }
+
+    private void UpdateProgress(ProcessingProgressEventArgs args)
+    {
+        var now = DateTime.Now;
+        if ((now - _lastProgressUpdateTime).TotalMilliseconds >= UpdateThrottleMs || !string.IsNullOrEmpty(args.ImagePath) || args.IsError)
+        {
+            ProgressChanged?.Invoke(this, args);
+            _lastProgressUpdateTime = now;
+        }
+    }
+
+    public async Task ProcessDirectoryAsync(string targetDirectory, CancellationToken cancellationToken = default)
+    {
+        string[] extensions = ["*.jpg", "*.jpeg"];
+
+        var imageFiles = new List<string>();
+
+        foreach (var ext in extensions)
+        {
+            imageFiles.AddRange(Directory.GetFiles(targetDirectory, ext));
+        }
+
+        var runningTasks = new List<Task>();
+
+        foreach (string filePath in imageFiles)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+
+            string displayFileName = GetDisplayFileName(filePath);
+
+            TagLib.Image.File? imageTags = null;
+            try
+            {
+                bool shouldProcess = false;
+                imageTags = TagLib.File.Create(filePath) as TagLib.Image.File;
+                if (imageTags != null)
+                {
+                    if (!imageTags.Writeable)
+                    {
+                        var reasons = imageTags.CorruptionReasons;
+                        var reason = reasons.Any()
+                            ? reasons.FirstOrDefault() ?? "Unknown reason"
+                            : "Unknown reason";
+                        UpdateProgress(new ProcessingProgressEventArgs
+                        {
+                            CurrentFile = displayFileName,
+                            Status = $"Tag is not writeable: {reason}",
+                            TotalFiles = TotalFileCount,
+                            ProcessedFiles = ++ProcessedFiles,
+                            IsError = true
+                        });
+                        imageTags.Dispose();
+                        imageTags = null;
+                        continue;
+                    }
+
+                    TagLib.Tag combinedTag = imageTags.GetTag(TagLib.TagTypes.XMP, true);
+
+                    switch (ProcessingMode)
+                    {
+                        case ProcessingModeEnum.ProcessAll:
+                            shouldProcess = true;
+                            break;
+                        case ProcessingModeEnum.SkipTagged:
+                            if (imageTags.ImageTag.Keywords.Length == 0 && combinedTag.Title != "-")
+                            {
+                                shouldProcess = true;
+                            }
+                            break;
+                        case ProcessingModeEnum.ProcessClassificationErrorsOnly:
+                            if (combinedTag.Title == "-")
+                            {
+                                shouldProcess = true;
+                            }
+                            break;
+                    }
+                }
+
+                if (shouldProcess)
+                {
+                    await _parallelProcessingSemaphore.WaitAsync(cancellationToken);
+                    var task = ProcessImageAsync(filePath, displayFileName, imageTags, cancellationToken);
+                    runningTasks.Add(task);
+                    imageTags = null; // Ownership transferred to ProcessImageAsync
+                }
+                else
+                {
+
+                    UpdateProgress(new ProcessingProgressEventArgs
+                    {
+                        CurrentFile = displayFileName,
+                        Status = "",
+                        TotalFiles = TotalFileCount,
+                        ProcessedFiles = ++ProcessedFiles,
+                        IsError = false
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                UpdateProgress(new ProcessingProgressEventArgs
+                {
+                    CurrentFile = displayFileName,
+                    Status = $"[Skipped] {ex.Message}",
+                    TotalFiles = TotalFileCount,
+                    ProcessedFiles = ++ProcessedFiles,
+                    IsError = true
+                });
+            }
+            finally
+            {
+                imageTags?.Dispose();
+            }
+        }
+
+        // Process subdirectories
+        foreach (string subdir in Directory.GetDirectories(targetDirectory))
+        {
+            await ProcessDirectoryAsync(subdir, cancellationToken);
+        }
+
+        // Wait for all parallel tasks to complete
+        try
+        {
+            await Task.WhenAll(runningTasks);
+        }
+        catch (Exception ex)
+        {
+            // All exceptions are already handled in ProcessImageAsync, this is just for cleanup
+            System.Diagnostics.Debug.WriteLine($"Error in parallel task completion: {ex.Message}");
+        }
+    }
+
+    private static string GetDisplayFileName(string filePath)
+    {
+        //filename and last directory
+        string parentDir = new DirectoryInfo(Path.GetDirectoryName(filePath) ?? "").Name;
+        string displayFileName = Path.Combine(parentDir, Path.GetFileName(filePath));
+        return displayFileName;
+    }
+
+    public async Task ProcessImageAsync(string filePath, string displayFileName, TagLib.Image.File? imageTags, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            string systemPrompt = GetSystemPrompt(CurrentLanguage);
+            string prompt = GetUserPrompt(CurrentLanguage);
+
+            string base64Image = Convert.ToBase64String(File.ReadAllBytes(filePath));
+
+            var requestBody = new
+            {
+                model = ModelName,
+                prompt = prompt,
+                system = systemPrompt,
+                stream = false,
+                images = new[] { base64Image },
+                options = new
+                {
+                    temperature = 0.5,
+                    num_predict = 150
+                }
+            };
+
+            for (int i = 0; i <= 5; i++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                try
+                {
+                    var response = await client.PostAsJsonAsync(OllamaEndpoint, requestBody, cancellationToken);
+
+                    if(response.StatusCode == System.Net.HttpStatusCode.InternalServerError)
+                    {
+                        if (MarkClassificationErrors)
+                        {
+                            UpdateMetadata(imageTags, filePath, String.Empty, true);
+                        }
+
+                        UpdateProgress(new ProcessingProgressEventArgs
+                        {
+                            CurrentFile =displayFileName,
+                            Status = $"Could not be processed: {response.ReasonPhrase}",
+                            IsError = true,
+                            TotalFiles = TotalFileCount,
+                            ProcessedFiles = ++ProcessedFiles,
+                        });
+                        break;
+                    }
+
+                    if (!response.IsSuccessStatusCode)
+                        throw new Exception($"HTTP Error: {response.StatusCode}");
+
+                    using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
+                    var result = doc.RootElement.GetProperty("response").GetString()?.Trim() ?? "";
+
+                    if (string.IsNullOrEmpty(result))
+                        throw new Exception("Empty response from model");
+
+                    UpdateMetadata(imageTags, filePath, result, false);
+
+
+                    UpdateProgress(new ProcessingProgressEventArgs
+                    {
+                        CurrentFile = displayFileName,
+                        Status = "Processed successfully",
+                        Tags = ExtractTags(result),
+                        Comment = ExtractComment(result),
+                        ImagePath = filePath,
+                        IsError = false,
+                        TotalFiles = TotalFileCount,
+                        ProcessedFiles = ++ProcessedFiles,
+                    });
+
+                    break;
+                }
+                catch (Exception)
+                {
+                    if (i == 5)
+                    {
+                        if(MarkClassificationErrors)
+                        {
+                            UpdateMetadata(imageTags, filePath, String.Empty, true);
+                        }
+
+                        throw;
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            UpdateProgress(new ProcessingProgressEventArgs
+            {
+                CurrentFile = displayFileName,
+                Status = "Cancelled",
+                IsError = false,
+                TotalFiles = TotalFileCount,
+                ProcessedFiles = ++ProcessedFiles,
+            });
+        }
+        catch (Exception ex)
+        {
+            UpdateProgress(new ProcessingProgressEventArgs
+            {
+                CurrentFile = displayFileName,
+                Status = $"Error: {ex.Message}",
+                IsError = true,
+                TotalFiles = TotalFileCount,
+                ProcessedFiles = ++ProcessedFiles,
+            });
+        }
+        finally
+        {
+            imageTags?.Dispose();
+            _parallelProcessingSemaphore.Release();
+        }
+    }
+
+    private void UpdateMetadata(TagLib.Image.File? imageTags, string filePath, string aiOutput, bool markAsClassificationError)
+    {
+        string[] tags;
+        string comment;
+
+        if (markAsClassificationError)
+        {
+            tags = [];
+            comment = "-";
+        }
+        else
+        {
+
+            var parts = aiOutput.Split('|', StringSplitOptions.TrimEntries);
+            if (parts.Length != 2)
+            {
+                throw new Exception($"Invalid response format from model: {aiOutput}");
+            }
+
+            tags = parts[0].Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+            if (tags.Length < 8)
+            {
+                throw new Exception($"Invalid number of tags from model: {aiOutput}");
+            }
+
+            comment = parts[1];
+        }
+
+
+        if (imageTags != null)
+        {
+            if (!imageTags.Writeable)
+            {
+                var reasons = imageTags.CorruptionReasons;
+                var reason = reasons.Any()
+                    ? reasons.FirstOrDefault() ?? "Unknown reason"
+                    : "Unknown reason";
+                throw new InvalidOperationException($"Could not write Tag data: {reason}");
+            }
+
+            TagLib.Tag combinedTag = imageTags.GetTag(TagLib.TagTypes.XMP, true);
+
+            combinedTag.Title = comment;
+            imageTags.ImageTag.Keywords = tags;
+
+            imageTags.Save();
+        }
+    }
+
+    private string[] ExtractTags(string aiOutput)
+    {
+        var parts = aiOutput.Split('|', StringSplitOptions.TrimEntries);
+        if (parts.Length >= 1)
+        {
+            return parts[0].Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        }
+        return [];
+    }
+
+    private string ExtractComment(string aiOutput)
+    {
+        var parts = aiOutput.Split('|', StringSplitOptions.TrimEntries);
+        if (parts.Length >= 2)
+        {
+            return parts[1];
+        }
+        return "";
+    }
+}
+
+public class ProcessingProgressEventArgs : EventArgs
+{
+    public string CurrentFile { get; set; } = "";
+    public string Status { get; set; } = "";
+    public string[]? Tags { get; set; }
+    public string Comment { get; set; } = "";
+    public string ImagePath { get; set; } = "";
+    public int TotalFiles { get; set; }
+    public int ProcessedFiles { get; set; }
+    public bool IsError { get; set; }
+}
+
+public class ProcessingCompleteEventArgs : EventArgs
+{
+    public int TotalFiles { get; set; }
+    public int ProcessedFiles { get; set; }
+}

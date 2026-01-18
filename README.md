@@ -1,4 +1,4 @@
-﻿# Tag Team ImageTagger
+﻿# TagTeam ImageTagger
 
 A Windows desktop application for automatically tagging and adding metadata to JPEG images using AI-powered local image analysis with Ollama and Gemma3.
 
@@ -38,6 +38,7 @@ This software is making changes to your image files. Make sure you made a backup
 - **.NET Runtime**: .NET 9.0 or later
 - **Ollama**: A running local Ollama instance (see Installation section below)
 - **RAM**: Minimum 8GB recommended (depending on image size and model)
+- **VRAM**: Runs well with 10GB VRAM on a Nvidia 3080
 
 ## Installation
 
@@ -66,12 +67,12 @@ This software is making changes to your image files. Make sure you made a backup
    - You should see a response confirming Ollama is running
    - By default, Ollama runs on port 11434
 
-### Build ImageTagger
+### Build TagTeam
 
 1. **Clone or Download the Project**
    ```bash
    git clone <repository-url>
-   cd ImageTaggerUI
+   cd TagTeam-AI-Image-Tagger
    ```
 
 2. **Build the Application**
@@ -93,7 +94,7 @@ This software is making changes to your image files. Make sure you made a backup
 
 ### Starting the Application
 
-1. Launch `ImageTagger` executable
+1. Launch `TagTeam` executable
 2. Click **"Select Folder"** to choose the directory containing your JPEG images
 3. Select a processing mode:
    - **Process All**: Process every JPEG image
@@ -115,7 +116,7 @@ The application automatically saves your preferences when you close it. The foll
 
 Settings are stored in:
 ```
-%AppData%\ImageTagger\ImageTaggerSettings.json
+%AppData%\TagTeam\TagTeamSettings.json
 ```
 
 If you want to reset all settings to defaults, simply delete this file and restart the application.
@@ -198,7 +199,7 @@ private const int UpdateThrottleMs = 100;
 
 User preferences are stored in JSON format. To manually reset all settings, delete the file at:
 ```
-%AppData%\ImageTagger\ImageTaggerSettings.json
+%AppData%\TagTeam\TagTeamSettings.json
 ```
 
 ## Troubleshooting
@@ -236,13 +237,13 @@ User preferences are stored in JSON format. To manually reset all settings, dele
 ## Project Structure
 
 ```
-ImageTaggerUI/
+TagTeam-AI-Image-Tagger/
 ├── MainForm.cs                  # Main UI form
 ├── MainForm.Designer.cs         # UI designer generated code
 ├── MainForm.resx                # UI resources
 ├── ImageProcessingService.cs    # Core image processing logic with language support
-├── ApplicationSettings.cs        # Settings persistence and restoration
-├── ImageTagger.csproj           # Project configuration
+├── ApplicationSettings.cs       # Settings persistence and restoration
+├── TagTeam.csproj               # Project configuration
 ├── Assemblies/                  # Third-party assemblies
 │   └── TagLibSharp.dll          # TagLib Sharp for metadata handling
 └── README.md                    # This file
@@ -277,7 +278,7 @@ uint ReadIFD (long baseOffset, uint offset, uint maxOffset)
 ## Performance Notes
 
 - **Processing Speed**: Depends on image size and Ollama model performance
-- **Typical Times**: 10-30 seconds per image with Gemma3:12b
+- **Typical Times**: 1-2 seconds per image with Gemma3:12b
 - **Parallel Processing**: Default 3 concurrent images balances speed vs. resource usage
 - **Memory**: Each parallel task uses ~500MB-1GB
 
@@ -330,7 +331,7 @@ For issues, feature requests, or questions:
 
 ## Changelog
 
-### Version 1.1.1
+### Version 1.1.1 (2026/01/18)
 - Consistently named the application to "TagTeam" throughout the documentation
 
 ### Version 1.1.0

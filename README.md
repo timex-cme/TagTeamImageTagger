@@ -24,6 +24,10 @@ A Windows desktop application for automatically tagging and adding metadata to J
 - **Parallel Processing**: Process up to 3 images simultaneously for optimal performance
 - **Cancellation Support**: Gracefully abort the processing at any time
 
+## Screenshots
+
+![Tag Team ImageTagger Application](Screenshot.png)
+
 ## Requirements
 
 - **Windows OS**: Windows 7 or later (tested on Windows 10+)

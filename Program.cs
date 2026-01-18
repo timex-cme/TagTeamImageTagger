@@ -1,4 +1,4 @@
-﻿using ImageTagger;
+﻿using TagTeam;
 
 static class Program
 {

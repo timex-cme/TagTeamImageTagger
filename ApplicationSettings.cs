@@ -3,7 +3,7 @@ using System.IO;
 using System.Text.Json;
 using static ImageProcessingService;
 
-namespace ImageTagger
+namespace TagTeam
 {
     /// <summary>
     /// Manages application settings persistence.
@@ -12,7 +12,7 @@ namespace ImageTagger
     public class ApplicationSettings
     {
         private readonly string settingsFilePath;
-        private const string SettingsFileName = "ImageTaggerSettings.json";
+        private const string SettingsFileName = "TagTeamSettings.json";
 
         public string SelectedFolderPath { get; set; } = "";
         public LanguageEnum TaggingLanguage { get; set; } = LanguageEnum.German;
@@ -23,7 +23,7 @@ namespace ImageTagger
         {
             // Store settings in the application data directory
             string appDataPath = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            string appFolder = Path.Combine(appDataPath, "ImageTagger");
+            string appFolder = Path.Combine(appDataPath, "TagTeam");
             
             // Create folder if it doesn't exist
             if (!Directory.Exists(appFolder))

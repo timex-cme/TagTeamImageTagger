@@ -330,6 +330,9 @@ For issues, feature requests, or questions:
 
 ## Changelog
 
+### Version 1.1.1
+- Consistently named the application to "TagTeam" throughout the documentation
+
 ### Version 1.1.0
 - Added multi-language support (German and English)
 - Added settings persistence and automatic restoration on startup

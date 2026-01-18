@@ -1,4 +1,4 @@
-namespace ImageTagger
+namespace TagTeam
 {
     partial class MainForm
     {

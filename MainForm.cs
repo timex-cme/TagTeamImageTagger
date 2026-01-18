@@ -3,7 +3,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace ImageTagger
+namespace TagTeam
 {
     public partial class MainForm : Form
     {
